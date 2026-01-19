@@ -10,6 +10,7 @@ import org.jenkinsci.plugins.github.pullrequest.events.GitHubPREvent;
 import org.jenkinsci.plugins.github.pullrequest.events.GitHubPREventDescriptor;
 import org.jenkinsci.plugins.github.pullrequest.restrictions.GitHubPRUserRestriction;
 import org.kohsuke.github.GHIssueComment;
+import org.kohsuke.github.GHIssueState;
 import org.kohsuke.github.GHPullRequest;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.slf4j.Logger;
@@ -18,6 +19,7 @@ import org.slf4j.LoggerFactory;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.util.Date;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -53,8 +55,20 @@ public class GitHubPRCommentEvent extends GitHubPREvent {
         final GitHubPRUserRestriction prUserRestriction = prDecisionContext.getPrUserRestriction();
 
         GitHubPRCause cause = null;
+        final boolean isClosedWithoutLocalState = isNull(localPR)
+                && GHIssueState.CLOSED.equals(remotePR.getState());
+        final Date issueUpdatedAt = resolveIssueUpdatedAt(listener, llog, remotePR, isClosedWithoutLocalState);
+        if (isClosedWithoutLocalState && isNull(issueUpdatedAt)) {
+            return null;
+        }
         try {
             for (GHIssueComment issueComment : remotePR.getComments()) {
+                if (isClosedWithoutLocalState) {
+                    Date commentUpdatedAt = resolveCommentUpdatedAt(issueComment);
+                    if (isNull(commentUpdatedAt) || !issueUpdatedAt.equals(commentUpdatedAt)) {
+                        continue;
+                    }
+                }
                 if (isNull(localPR) // test all comments for trigger word even if we never saw PR before
                         || isNull(localPR.getLastCommentCreatedAt()) // PR was created but had no comments
                         // don't check comments that we saw before
@@ -79,6 +93,36 @@ public class GitHubPRCommentEvent extends GitHubPREvent {
         }
 
         return cause;
+    }
+
+    private Date resolveIssueUpdatedAt(TaskListener listener,
+                                       PrintStream llog,
+                                       GHPullRequest remotePR,
+                                       boolean shouldResolve) {
+        if (!shouldResolve) {
+            return null;
+        }
+
+        try {
+            Date issueUpdatedAt = remotePR.getIssueUpdatedAt();
+            if (isNull(issueUpdatedAt)) {
+                llog.println(DISPLAY_NAME + ": no issue update time available, skipping comment scan for closed PR "
+                        + remotePR.getNumber());
+            }
+            return issueUpdatedAt;
+        } catch (IOException e) {
+            LOG.warn("Couldn't obtain issue update time for PR #{}", remotePR.getNumber(), e);
+            listener.error("Couldn't obtain issue update time", e);
+            return null;
+        }
+    }
+
+    private static Date resolveCommentUpdatedAt(GHIssueComment issueComment) throws IOException {
+        Date updatedAt = issueComment.getUpdatedAt();
+        if (nonNull(updatedAt)) {
+            return updatedAt;
+        }
+        return issueComment.getCreatedAt();
     }
 
     private GitHubPRCause checkComment(GitHubPRDecisionContext prDecisionContext,

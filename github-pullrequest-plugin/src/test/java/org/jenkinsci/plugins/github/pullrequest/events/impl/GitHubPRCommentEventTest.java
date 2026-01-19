@@ -214,6 +214,67 @@ public class GitHubPRCommentEventTest {
         assertNotNull(cause);
     }
 
+    @Test
+    public void testClosedPrSkipsHistoricComments() throws IOException {
+        commonExpectations(emptySet());
+        when(remotePr.getState()).thenReturn(GHIssueState.CLOSED);
+
+        Date oldCommentDate = new Date(1000L);
+        Date issueUpdatedAt = new Date(2000L);
+
+        when(remotePr.getIssueUpdatedAt()).thenReturn(issueUpdatedAt);
+        when(comment.getCreatedAt()).thenReturn(oldCommentDate);
+        when(comment.getUpdatedAt()).thenReturn(oldCommentDate);
+        when(comment.getBody()).thenReturn("test foo, bar tags please.");
+
+        final ArrayList<GHIssueComment> ghIssueComments = new ArrayList<>();
+        ghIssueComments.add(comment);
+        when(remotePr.getComments()).thenReturn(ghIssueComments);
+
+        GitHubPRCause cause = new GitHubPRCommentEvent("test ([A-Za-z0-9 ,!]+) tags please.")
+                .check(newGitHubPRDecisionContext()
+                        .withPrTrigger(trigger)
+                        .withRemotePR(remotePr)
+                        .withListener(listener)
+                        .build()
+                ); // localPR is null and PR is closed
+
+        assertNull(cause);
+    }
+
+    @Test
+    public void testClosedPrMatchesLatestCommentUpdate() throws IOException {
+        commonExpectations(emptySet());
+        causeCreationExpectations();
+        when(remotePr.getState()).thenReturn(GHIssueState.CLOSED);
+
+        Date commentDate = new Date(2000L);
+        when(remotePr.getIssueUpdatedAt()).thenReturn(commentDate);
+        when(comment.getCreatedAt()).thenReturn(new Date(1000L));
+        when(comment.getUpdatedAt()).thenReturn(commentDate);
+
+        final String body = "test foo, bar tags please.";
+        when(comment.getBody()).thenReturn(body);
+
+        final ArrayList<GHIssueComment> ghIssueComments = new ArrayList<>();
+        ghIssueComments.add(comment);
+        when(remotePr.getComments()).thenReturn(ghIssueComments);
+
+        GitHubPRCause cause = new GitHubPRCommentEvent("test ([A-Za-z0-9 ,!]+) tags please.")
+                .check(newGitHubPRDecisionContext()
+                        .withPrTrigger(trigger)
+                        .withRemotePR(remotePr)
+                        .withListener(listener)
+                        .build()
+                ); // localPR is null and PR is closed
+
+        assertThat(cause.getCommentAuthorName(), is("commentOwnerName"));
+        assertThat(cause.getCommentAuthorEmail(), is("commentOwner@email.com"));
+        assertThat(cause.getCommentBody(), is(body));
+        assertThat(cause.getCommentBodyMatch(), is("foo, bar"));
+        assertNotNull(cause);
+    }
+
     private void commonExpectations(Set<String> localLabels) throws IOException {
         when(labels.getLabelsSet()).thenReturn(localLabels);
         when(localPR.getLabels()).thenReturn(localLabels);
