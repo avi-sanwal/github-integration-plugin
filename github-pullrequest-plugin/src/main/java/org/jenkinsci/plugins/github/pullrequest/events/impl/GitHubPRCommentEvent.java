@@ -4,6 +4,7 @@ import com.github.kostyasha.github.integration.generic.GitHubPRDecisionContext;
 import hudson.Extension;
 import hudson.model.Job;
 import hudson.model.TaskListener;
+import hudson.scheduler.CronTab;
 import hudson.scheduler.CronTabList;
 import hudson.scheduler.Hash;
 import org.jenkinsci.Symbol;
@@ -24,8 +25,10 @@ import org.slf4j.LoggerFactory;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -133,15 +136,23 @@ public class GitHubPRCommentEvent extends GitHubPREvent {
 
         Job<?, ?> job = trigger.getJob();
         String seed = job == null || job.getFullName() == null ? "github-pullrequest-trigger" : job.getFullName();
+        List<CronTab> tabs = parseCronTabs(spec, Hash.from(seed), llog);
+        if (tabs.isEmpty()) {
+            llog.println(DISPLAY_NAME + ": no valid cron entries, using 0s polling window");
+            return 0L;
+        }
         try {
-            CronTabList cronTabs = CronTabList.create(spec, Hash.from(seed));
-            Calendar previous = cronTabs.previous();
-            Calendar next = cronTabs.next();
-            if (previous == null || next == null) {
+            Calendar next = nextScheduledAfter(tabs, System.currentTimeMillis() + 1000L);
+            if (next == null) {
                 llog.println(DISPLAY_NAME + ": unable to resolve cron interval, using 0s polling window");
                 return 0L;
             }
-            long intervalMillis = next.getTimeInMillis() - previous.getTimeInMillis();
+            Calendar nextAfter = nextScheduledAfter(tabs, next.getTimeInMillis() + 1000L);
+            if (nextAfter == null) {
+                llog.println(DISPLAY_NAME + ": unable to resolve cron interval, using 0s polling window");
+                return 0L;
+            }
+            long intervalMillis = nextAfter.getTimeInMillis() - next.getTimeInMillis();
             if (intervalMillis <= 0L) {
                 llog.println(DISPLAY_NAME + ": non-positive cron interval, using 0s polling window");
                 return 0L;
@@ -152,6 +163,59 @@ public class GitHubPRCommentEvent extends GitHubPREvent {
             llog.println(DISPLAY_NAME + ": invalid cron spec, using 0s polling window");
             return 0L;
         }
+    }
+
+    private List<CronTab> parseCronTabs(String spec, Hash hash, PrintStream llog) {
+        List<CronTab> tabs = new ArrayList<>();
+        String timezone = null;
+        int lineNumber = 0;
+        for (String line : spec.split("\\r?\\n")) {
+            lineNumber++;
+            String trimmed = line.trim();
+            if (lineNumber == 1 && trimmed.startsWith("TZ=")) {
+                String tz = trimmed.replace("TZ=", "");
+                timezone = CronTabList.getValidTimezone(tz);
+                if (timezone == null) {
+                    llog.println(DISPLAY_NAME + ": invalid cron timezone, using 0s polling window");
+                    return new ArrayList<>();
+                }
+                continue;
+            }
+            if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+                continue;
+            }
+            try {
+                tabs.add(new CronTab(trimmed, lineNumber, hash, timezone));
+            } catch (IllegalArgumentException e) {
+                LOG.warn("Invalid cron entry '{}' while resolving polling interval for closed PR scan", trimmed, e);
+                llog.println(DISPLAY_NAME + ": invalid cron entry, using 0s polling window");
+                return new ArrayList<>();
+            }
+        }
+        return tabs;
+    }
+
+    private static Calendar nextScheduledAfter(List<CronTab> tabs, long baseMillis) {
+        Calendar next = null;
+        for (CronTab tab : tabs) {
+            Calendar base = calendarFor(tab, baseMillis);
+            Calendar candidate = tab.ceil(base);
+            if (candidate == null) {
+                continue;
+            }
+            if (next == null || candidate.before(next)) {
+                next = candidate;
+            }
+        }
+        return next;
+    }
+
+    private static Calendar calendarFor(CronTab tab, long baseMillis) {
+        Calendar calendar = tab.getTimeZone() == null
+                ? Calendar.getInstance()
+                : Calendar.getInstance(tab.getTimeZone());
+        calendar.setTimeInMillis(baseMillis);
+        return calendar;
     }
 
     private static Date resolveCommentUpdatedAt(GHIssueComment issueComment) throws IOException {
