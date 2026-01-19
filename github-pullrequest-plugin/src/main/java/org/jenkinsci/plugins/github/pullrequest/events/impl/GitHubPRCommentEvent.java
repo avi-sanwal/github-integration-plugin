@@ -2,10 +2,15 @@ package org.jenkinsci.plugins.github.pullrequest.events.impl;
 
 import com.github.kostyasha.github.integration.generic.GitHubPRDecisionContext;
 import hudson.Extension;
+import hudson.model.Job;
 import hudson.model.TaskListener;
+import hudson.scheduler.CronTabList;
+import hudson.scheduler.Hash;
 import org.jenkinsci.Symbol;
 import org.jenkinsci.plugins.github.pullrequest.GitHubPRCause;
 import org.jenkinsci.plugins.github.pullrequest.GitHubPRPullRequest;
+import org.jenkinsci.plugins.github.pullrequest.GitHubPRTrigger;
+import org.jenkinsci.plugins.github.pullrequest.GitHubPRTriggerMode;
 import org.jenkinsci.plugins.github.pullrequest.events.GitHubPREvent;
 import org.jenkinsci.plugins.github.pullrequest.events.GitHubPREventDescriptor;
 import org.jenkinsci.plugins.github.pullrequest.restrictions.GitHubPRUserRestriction;
@@ -19,6 +24,7 @@ import org.slf4j.LoggerFactory;
 import edu.umd.cs.findbugs.annotations.NonNull;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -34,6 +40,7 @@ import static java.util.Objects.nonNull;
 public class GitHubPRCommentEvent extends GitHubPREvent {
     private static final String DISPLAY_NAME = "Comment matched to pattern";
     private static final Logger LOG = LoggerFactory.getLogger(GitHubPRCommentEvent.class);
+    private static final long CLOSED_PR_COMMENT_GRACE_MILLIS = 10 * 1000L;
 
     private String comment = "";
 
@@ -57,15 +64,13 @@ public class GitHubPRCommentEvent extends GitHubPREvent {
         GitHubPRCause cause = null;
         final boolean isClosedWithoutLocalState = isNull(localPR)
                 && GHIssueState.CLOSED.equals(remotePR.getState());
-        final Date issueUpdatedAt = resolveIssueUpdatedAt(listener, llog, remotePR, isClosedWithoutLocalState);
-        if (isClosedWithoutLocalState && isNull(issueUpdatedAt)) {
-            return null;
-        }
+        final Date closedPrCommentCutoff =
+                resolveClosedPrCommentCutoff(prDecisionContext, llog, isClosedWithoutLocalState);
         try {
             for (GHIssueComment issueComment : remotePR.getComments()) {
                 if (isClosedWithoutLocalState) {
                     Date commentUpdatedAt = resolveCommentUpdatedAt(issueComment);
-                    if (isNull(commentUpdatedAt) || !issueUpdatedAt.equals(commentUpdatedAt)) {
+                    if (isNull(commentUpdatedAt) || commentUpdatedAt.before(closedPrCommentCutoff)) {
                         continue;
                     }
                 }
@@ -95,25 +100,57 @@ public class GitHubPRCommentEvent extends GitHubPREvent {
         return cause;
     }
 
-    private Date resolveIssueUpdatedAt(TaskListener listener,
-                                       PrintStream llog,
-                                       GHPullRequest remotePR,
-                                       boolean shouldResolve) {
+    private Date resolveClosedPrCommentCutoff(GitHubPRDecisionContext prDecisionContext,
+                                              PrintStream llog,
+                                              boolean shouldResolve) {
         if (!shouldResolve) {
             return null;
         }
+        long pollingIntervalMillis = resolvePollingIntervalMillis(prDecisionContext, llog);
+        long cutoffMillis = System.currentTimeMillis() - pollingIntervalMillis - CLOSED_PR_COMMENT_GRACE_MILLIS;
+        Date cutoff = new Date(cutoffMillis);
+        llog.println(DISPLAY_NAME + ": closed PR scan limited to comments updated since " + cutoff);
+        return cutoff;
+    }
 
+    private long resolvePollingIntervalMillis(GitHubPRDecisionContext prDecisionContext, PrintStream llog) {
+        GitHubPRTrigger trigger = prDecisionContext.getTrigger();
+        if (isNull(trigger)) {
+            return 0L;
+        }
+
+        GitHubPRTriggerMode triggerMode = trigger.getTriggerMode();
+        if (triggerMode == GitHubPRTriggerMode.HEAVY_HOOKS
+                || triggerMode == GitHubPRTriggerMode.LIGHT_HOOKS) {
+            return 0L;
+        }
+
+        String spec = trigger.getSpec();
+        if (isNull(spec) || spec.trim().isEmpty()) {
+            llog.println(DISPLAY_NAME + ": empty cron spec, using 0s polling window for closed PR scan");
+            return 0L;
+        }
+
+        Job<?, ?> job = trigger.getJob();
+        String seed = job == null || job.getFullName() == null ? "github-pullrequest-trigger" : job.getFullName();
         try {
-            Date issueUpdatedAt = remotePR.getIssueUpdatedAt();
-            if (isNull(issueUpdatedAt)) {
-                llog.println(DISPLAY_NAME + ": no issue update time available, skipping comment scan for closed PR "
-                        + remotePR.getNumber());
+            CronTabList cronTabs = CronTabList.create(spec, Hash.from(seed));
+            Calendar previous = cronTabs.previous();
+            Calendar next = cronTabs.next();
+            if (previous == null || next == null) {
+                llog.println(DISPLAY_NAME + ": unable to resolve cron interval, using 0s polling window");
+                return 0L;
             }
-            return issueUpdatedAt;
-        } catch (IOException e) {
-            LOG.warn("Couldn't obtain issue update time for PR #{}", remotePR.getNumber(), e);
-            listener.error("Couldn't obtain issue update time", e);
-            return null;
+            long intervalMillis = next.getTimeInMillis() - previous.getTimeInMillis();
+            if (intervalMillis <= 0L) {
+                llog.println(DISPLAY_NAME + ": non-positive cron interval, using 0s polling window");
+                return 0L;
+            }
+            return intervalMillis;
+        } catch (IllegalArgumentException e) {
+            LOG.warn("Invalid cron spec '{}' while resolving polling interval for closed PR scan", spec, e);
+            llog.println(DISPLAY_NAME + ": invalid cron spec, using 0s polling window");
+            return 0L;
         }
     }
 

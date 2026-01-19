@@ -5,6 +5,7 @@ import org.jenkinsci.plugins.github.pullrequest.GitHubPRCause;
 import org.jenkinsci.plugins.github.pullrequest.GitHubPRLabel;
 import org.jenkinsci.plugins.github.pullrequest.GitHubPRPullRequest;
 import org.jenkinsci.plugins.github.pullrequest.GitHubPRTrigger;
+import org.jenkinsci.plugins.github.pullrequest.GitHubPRTriggerMode;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.kohsuke.github.GHCommitPointer;
@@ -41,6 +42,7 @@ import static org.mockito.Mockito.when;
  */
 @RunWith(MockitoJUnitRunner.class)
 public class GitHubPRCommentEventTest {
+    private static final long CLOSED_PR_COMMENT_GRACE_MILLIS = 10 * 1000L;
 
     @Mock
     private GHPullRequest remotePr;
@@ -218,11 +220,9 @@ public class GitHubPRCommentEventTest {
     public void testClosedPrSkipsHistoricComments() throws IOException {
         commonExpectations(emptySet());
         when(remotePr.getState()).thenReturn(GHIssueState.CLOSED);
+        when(trigger.getTriggerMode()).thenReturn(GitHubPRTriggerMode.HEAVY_HOOKS);
 
-        Date oldCommentDate = new Date(1000L);
-        Date issueUpdatedAt = new Date(2000L);
-
-        when(remotePr.getIssueUpdatedAt()).thenReturn(issueUpdatedAt);
+        Date oldCommentDate = new Date(System.currentTimeMillis() - CLOSED_PR_COMMENT_GRACE_MILLIS - 20000L);
         when(comment.getCreatedAt()).thenReturn(oldCommentDate);
         when(comment.getUpdatedAt()).thenReturn(oldCommentDate);
         when(comment.getBody()).thenReturn("test foo, bar tags please.");
@@ -247,10 +247,10 @@ public class GitHubPRCommentEventTest {
         commonExpectations(emptySet());
         causeCreationExpectations();
         when(remotePr.getState()).thenReturn(GHIssueState.CLOSED);
+        when(trigger.getTriggerMode()).thenReturn(GitHubPRTriggerMode.HEAVY_HOOKS);
 
-        Date commentDate = new Date(2000L);
-        when(remotePr.getIssueUpdatedAt()).thenReturn(commentDate);
-        when(comment.getCreatedAt()).thenReturn(new Date(1000L));
+        Date commentDate = new Date(System.currentTimeMillis() - 1000L);
+        when(comment.getCreatedAt()).thenReturn(new Date(System.currentTimeMillis() - CLOSED_PR_COMMENT_GRACE_MILLIS));
         when(comment.getUpdatedAt()).thenReturn(commentDate);
 
         final String body = "test foo, bar tags please.";
